@@ -33,25 +33,26 @@ void handleRoot() {
 }
 
 void handleCapture() {
+  // Turn on flash just before capture and off immediately after
   digitalWrite(LED_GPIO_NUM, HIGH);
-  delay(100);  // Flash light delay
-
+  
   camera_fb_t* fb = esp_camera_fb_get();
+  digitalWrite(LED_GPIO_NUM, LOW);
+  
   if (!fb) {
-    digitalWrite(LED_GPIO_NUM, LOW);
     server.send(500, "text/plain", "Camera capture failed");
     return;
   }
 
   server.sendHeader("Content-Type", "image/jpeg");
+  server.sendHeader("Connection", "close");
   server.send_P(200, "image/jpeg", (const char*)fb->buf, fb->len);
   esp_camera_fb_return(fb);
-
-  digitalWrite(LED_GPIO_NUM, LOW);
 }
 
 void setup() {
   Serial.begin(115200);
+  Serial.setDebugOutput(true);
 
   // Setup LED pin
   pinMode(LED_GPIO_NUM, OUTPUT);
@@ -80,42 +81,51 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
+  // Adjust these settings for better performance
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 10;
+    config.frame_size = FRAMESIZE_SVGA; // 800x600 - better than 96x96
+    config.jpeg_quality = 12;           // Lower quality = faster
     config.fb_count = 2;
   } else {
-    config.frame_size = FRAMESIZE_QQVGA;
+    config.frame_size = FRAMESIZE_VGA;   // 640x480
     config.jpeg_quality = 12;
     config.fb_count = 1;
   }
 
   // Initialize camera
-  if (esp_camera_init(&config) != ESP_OK) {
-    Serial.println("Camera init failed");
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
     delay(1000);
     ESP.restart();
   }
   Serial.println("Camera initialized");
 
-  // WiFi setup
+  // WiFi setup with timeout
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  Serial.print("Connecting");
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.print("Connecting to WiFi");
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 10000) {
     delay(500);
     Serial.print(".");
   }
 
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nFailed to connect to WiFi!");
+    delay(2000);
+    ESP.restart();
+  }
+
   Serial.println("\nWiFi connected");
-  Serial.print("Camera Stream URL: http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("/capture");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/capture", HTTP_GET, handleCapture);
   server.begin();
+  Serial.println("HTTP server started");
 }
 
 void loop() {

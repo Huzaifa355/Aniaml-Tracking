@@ -24,7 +24,7 @@ if interpreter is None:
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-class_names = ['Camel', 'Cow', 'Goat']
+class_names = ['Cow', 'Goat','Hen']
 
 def preprocess_img(uploaded_file):
     img = Image.open(uploaded_file).resize((96, 96)).convert("RGB")
