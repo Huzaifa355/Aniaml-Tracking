@@ -27,7 +27,7 @@ output_details = interpreter.get_output_details()
 class_names = ['Cow', 'Goat','Hen']
 
 def preprocess_img(uploaded_file):
-    img = Image.open(uploaded_file).resize((96, 96)).convert("RGB")
+    img = Image.open(uploaded_file).resize((224, 224)).convert("RGB")
     img_array = image.img_to_array(img)
     img_array = np.expand_dims(img_array, axis=0) / 255.0
     return img_array.astype(np.float32)

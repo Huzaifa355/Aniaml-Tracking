@@ -19,33 +19,39 @@
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-#define IR_A 4
+// IR Sensor Pins
+#define IR_A 6
 #define IR_B 5
+const unsigned long debounceDelay = 50;  // Debounce time in ms
 
-// Wi-Fi credentials
+// Wi-Fi credentials (station mode)
 const char* ssid     = "Dhanju";
 const char* password = "Huzaifa355";
 
+// AP credentials
+const char* ap_ssid     = "iotex";
+const char* ap_password = "12345678";
+
 // Camera endpoint
-const char* cam_ip   = "http://192.168.100.110/capture";
+const char* cam_ip   = "http://192.168.4.2/capture";
 
 // InfluxDB config
-const char* influx_host   = "http://192.168.137.1:8086";
+const char* influx_host   = "http://192.168.100.112:8086";
 const char* influx_org    = "student";
 const char* influx_bucket = "Animal_Tracking";
 const char* influx_token  = "aCBR21LJQE_S2nhPNGwEucEXjHWo0fdbXVhwOUNlYUAkXXTTc1jFbaNfwrUghdxQc_ALuenbe30hzPD7vAfSqw==";
 
-// Updated tensor arena size for 224x224 model
-constexpr int kTensorArenaSize = 6 * 1024 * 1024;  // Increased to 6MB
-uint8_t* tensor_arena = nullptr;
+// TensorFlow configuration
+constexpr int kTensorArenaSize = 6 * 1024 * 1024;  // 6MB
+uint8_t* tensor_arena = nullptr; 
 tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* input  = nullptr;
 TfLiteTensor* output = nullptr;
 
-// Model input dimensions - Updated to match your model
-const int IMG_WIDTH = 224;   // Changed from 96 to 224
-const int IMG_HEIGHT = 224;  // Changed from 96 to 224
-const int IMG_CHANNELS = 3;  // RGB
+// Model input dimensions
+const int IMG_WIDTH = 224;
+const int IMG_HEIGHT = 224;
+const int IMG_CHANNELS = 3;
 
 // Counts
 int cowCount   = 0;
@@ -56,7 +62,11 @@ int totalCount = 0;
 // Last detection confidence
 float lastConfidence = 0.0f;
 
-// Forward declarations
+// IR Sensor State Tracking
+unsigned long lastTriggerTimeA = 0;
+unsigned long lastTriggerTimeB = 0;
+
+// Function prototypes
 void setupWiFi();
 void initModel();
 void showWelcome();
@@ -64,6 +74,100 @@ void fetchLastCounts();
 void updateOLED();
 void publishInfluxDB(int label, const String& direction);
 void classifyAndUpdate(const String& direction);
+void softmax(float* input, int length);
+void resizeImageBilinear(const uint8_t* fullImage, int srcWidth, int srcHeight,
+                         float* output, int dstWidth, int dstHeight);
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Increase CPU frequency for better performance
+  Serial.println("Setting CPU frequency to 240MHz");
+  setCpuFrequencyMhz(240);
+  pinMode(2, OUTPUT);
+  digitalWrite(2, HIGH);
+
+  // PSRAM check
+  if (!psramFound()) {
+    Serial.println("ERROR: No PSRAM available!");
+    while(1);
+  }
+  
+  // GPIO inits
+  pinMode(IR_A, INPUT_PULLUP);
+  pinMode(IR_B, INPUT_PULLUP);
+
+  // OLED init
+  Wire.begin(9, 8);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED initialization failed");
+    while(1);
+  }
+
+  // SPIFFS init
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS mount failed");
+    while(1);
+  }
+
+  // 1) Welcome screen
+  showWelcome();
+
+  // 2) Connect Wi-Fi (station) and start AP
+  setupWiFi();
+
+  // 3) Setup time synchronization
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  // 4) Load last saved counts from InfluxDB
+  fetchLastCounts();
+
+  // 5) Initialize TensorFlow model
+  initModel();
+
+  // 6) Draw initial main screen
+  updateOLED();
+  
+  Serial.println("System ready for animal classification!");
+}
+
+void loop() {
+  // Keep Wi-Fi alive
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Reconnecting WiFi...");
+    setupWiFi();
+  }
+
+  bool stateA = digitalRead(IR_A);
+  bool stateB = digitalRead(IR_B);
+  unsigned long currentTime = millis();
+
+  // Trigger A (Entrance)
+  if (stateA == LOW && currentTime - lastTriggerTimeA > debounceDelay) {
+    lastTriggerTimeA = currentTime;
+
+    // Check if exit sensor is not triggered
+    if (digitalRead(IR_B) == HIGH) {
+      Serial.println("Direction: IN (Animal Entering)");
+      classifyAndUpdate("IN");
+    }
+  }
+
+  // Trigger B (Exit)
+  if (stateB == LOW && currentTime - lastTriggerTimeB > debounceDelay) {
+    lastTriggerTimeB = currentTime;
+
+    // Check if entrance sensor is not triggered
+    if (digitalRead(IR_A) == HIGH) {
+      Serial.println("Direction: OUT (Animal Exiting)");
+      classifyAndUpdate("OUT");
+    }
+  }
+
+  delay(10); // Small delay to prevent excessive polling
+}
+
+// ==================== Helper Functions ====================
 
 void softmax(float* input, int length) {
   float maxVal = input[0];
@@ -82,7 +186,6 @@ void softmax(float* input, int length) {
   }
 }
 
-// Improved bilinear interpolation for better image quality
 void resizeImageBilinear(
   const uint8_t* fullImage, int srcWidth, int srcHeight,
   float* output, int dstWidth, int dstHeight)
@@ -114,104 +217,13 @@ void resizeImageBilinear(
         float bottom = bottomLeft + (bottomRight - bottomLeft) * xWeight;
         float pixel  = top + (bottom - top) * yWeight;
 
-        // Normalize to [-1, 1] range as expected by MobileNet
+        // Normalize to [-1, 1] range
         int outputIdx = (y * dstWidth + x) * 3 + c;
         output[outputIdx] = (pixel / 127.5f) - 1.0f;
       }
     }
   }
 }
-
-void setup() {
-  Serial.begin(115200);
-  
-  // Increase CPU frequency for better performance
-  Serial.println("Setting CPU frequency to 240MHz");
-  setCpuFrequencyMhz(240);
-  pinMode(2, OUTPUT);
-  digitalWrite(2, HIGH);
-
-  // PSRAM check - Critical for 224x224 processing
-  if (!psramFound()) {
-    Serial.println("ERROR: No PSRAM available! This model requires PSRAM.");
-    while(1);
-  }
-  
-  size_t psramSize = ESP.getPsramSize();
-  size_t freePsram = ESP.getFreePsram();
-  Serial.printf("PSRAM Total: %d bytes, Free: %d bytes\n", psramSize, freePsram);
-
-  // GPIO inits
-  pinMode(IR_A, INPUT);
-  pinMode(IR_B, INPUT);
-
-  // OLED init
-  Wire.begin(9, 8);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED initialization failed");
-    while(1);
-  }
-
-  // SPIFFS init
-  if (!SPIFFS.begin(true)) {
-    Serial.println("SPIFFS mount failed");
-    while(1);
-  }
-
-  // 1) Welcome screen
-  showWelcome();
-
-  // 2) Connect Wi-Fi
-  setupWiFi();
-
-  // 3) Setup time synchronization
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-
-  // 4) Load last saved counts from InfluxDB
-  fetchLastCounts();
-
-  // 5) Initialize TensorFlow model
-  initModel();
-
-  // 6) Draw initial main screen
-  updateOLED();
-  
-  Serial.println("System ready for animal classification!");
-}
-
-void loop() {
-  // Keep Wi-Fi alive
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Reconnecting WiFi...");
-    setupWiFi();
-  }
-
-  static bool lastA = digitalRead(IR_A);
-  static bool lastB = digitalRead(IR_B);
-
-  bool currentA = digitalRead(IR_A);
-  bool currentB = digitalRead(IR_B);
-
-  // Detect direction based on IR sensor sequence
-  if (lastA != currentA || lastB != currentB) {
-    if (currentA && !currentB) {
-      Serial.println("Motion detected: IN direction");
-      classifyAndUpdate("IN");
-    }
-    else if (!currentA && currentB) {
-      Serial.println("Motion detected: OUT direction");
-      classifyAndUpdate("OUT");
-    }
-    
-    lastA = currentA;
-    lastB = currentB;
-    delay(100);  // Debounce delay
-  }
-  
-  delay(10); // Small delay to prevent excessive polling
-}
-
-// ———————————————— Helper Functions —————————————————
 
 void showWelcome() {
   display.clearDisplay();
@@ -231,6 +243,26 @@ void showWelcome() {
 }
 
 void setupWiFi() {
+  // Start in AP+STA mode
+  WiFi.mode(WIFI_AP_STA);
+
+  // Begin Soft AP
+  bool apStarted = WiFi.softAP(ap_ssid, ap_password);
+  if (apStarted) {
+    IPAddress apIP = WiFi.softAPIP();
+    Serial.printf("AP Mode started. SSID: %s, IP: %s\n", ap_ssid, apIP.toString().c_str());
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.printf("AP: %s", ap_ssid);
+    display.setCursor(0, 10);
+    display.printf("IP: %s", apIP.toString().c_str());
+    display.display();
+    delay(2000);
+  } else {
+    Serial.println("Failed to start AP");
+  }
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -282,27 +314,25 @@ void initModel() {
   tensor_arena = (uint8_t*)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!tensor_arena) {
     Serial.println("Failed to allocate tensor arena in PSRAM!");
-    Serial.printf("Requested size: %d bytes\n", kTensorArenaSize);
-    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
     while(1);
   }
   
   Serial.printf("Tensor arena allocated: %d bytes in PSRAM\n", kTensorArenaSize);
 
-  // Updated op resolver for MobileNetV1 with quantization
+  // Updated op resolver
   static tflite::MicroMutableOpResolver<12> resolver;
   resolver.AddConv2D();
   resolver.AddDepthwiseConv2D();
   resolver.AddMaxPool2D();
-  resolver.AddAveragePool2D();  // Added for MobileNet
+  resolver.AddAveragePool2D();
   resolver.AddFullyConnected();
   resolver.AddSoftmax();
   resolver.AddReshape();
   resolver.AddQuantize();
   resolver.AddDequantize();
   resolver.AddMean();
-  resolver.AddRelu();           // Added for MobileNet activations
-  resolver.AddRelu6();          // Added for MobileNet activations
+  resolver.AddRelu();
+  resolver.AddRelu6();
 
   static tflite::MicroInterpreter static_interpreter(
     model, resolver, tensor_arena, kTensorArenaSize
@@ -312,7 +342,6 @@ void initModel() {
   TfLiteStatus allocate_status = interpreter->AllocateTensors();
   if (allocate_status != kTfLiteOk) {
     Serial.println("Tensor allocation failed!");
-    Serial.printf("Status: %d\n", allocate_status);
     while(1);
   }
 
@@ -332,37 +361,22 @@ void initModel() {
     while(1);
   }
 
-  // Verify input dimensions match your model (224x224x3)
+  // Verify input dimensions
   if (input->dims->size != 4 || 
       input->dims->data[1] != 224 || 
       input->dims->data[2] != 224 || 
       input->dims->data[3] != 3) {
     Serial.println("ERROR: Input dimensions don't match expected 224x224x3!");
-    Serial.printf("Got dimensions: ");
-    for (int i = 0; i < input->dims->size; i++) {
-      Serial.printf("%d ", input->dims->data[i]);
-    }
-    Serial.println();
     while(1);
   }
 
-  // Verify output dimensions (should be [1, 3] for 3 classes)
+  // Verify output dimensions
   if (output->dims->size != 2 || output->dims->data[1] != 3) {
     Serial.println("ERROR: Output dimensions don't match expected [1, 3]!");
-    Serial.printf("Got output dimensions: ");
-    for (int i = 0; i < output->dims->size; i++) {
-      Serial.printf("%d ", output->dims->data[i]);
-    }
-    Serial.println();
     while(1);
   }
 
   Serial.println("Model initialized successfully!");
-  Serial.printf("Input: [%d, %d, %d, %d] (float32)\n", 
-               input->dims->data[0], input->dims->data[1], 
-               input->dims->data[2], input->dims->data[3]);
-  Serial.printf("Output: [%d, %d] (float32)\n", 
-               output->dims->data[0], output->dims->data[1]);
 }
 
 void fetchLastCounts() {
@@ -425,12 +439,9 @@ void updateOLED() {
   display.setCursor(0, 24);
   display.printf("Last Confidence: %.2f", lastConfidence);
   display.setCursor(0, 36);
-  
-  // Show model info
   display.printf("Model: MobileNetV1-224");
   display.setCursor(0, 48);
   display.printf("PSRAM Free: %dKB", ESP.getFreePsram()/1024);
-  
   display.display();
 }
 
@@ -441,13 +452,10 @@ void publishInfluxDB(int label, const String& direction) {
   }
 
   time_t now = time(nullptr);
-  if (now < 1000000000) { // Invalid timestamp
-    Serial.println("Invalid timestamp, skipping InfluxDB write");
-    return;
-  }
+  if (now < 1000000000) return;
   
   char ts[32];
-  snprintf(ts, sizeof(ts), "%lld", (int64_t)now * 1000000000LL); // nanoseconds
+  snprintf(ts, sizeof(ts), "%lld", (int64_t)now * 1000000000LL);
 
   static const char* names[3] = { "cow", "goat", "hen" };
 
@@ -476,10 +484,6 @@ void publishInfluxDB(int label, const String& direction) {
     Serial.println("InfluxDB: Data written successfully");
   } else {
     Serial.printf("InfluxDB write failed, HTTP code: %d\n", code);
-    if (code > 0) {
-      String response = http.getString();
-      Serial.println("Response: " + response);
-    }
   }
   http.end();
   updateOLED();
@@ -496,7 +500,7 @@ void classifyAndUpdate(const String& direction) {
   Serial.println("[1] Capturing image from camera...");
   HTTPClient http;
   http.begin(cam_ip);
-  http.setTimeout(15000); // Increased timeout
+  http.setTimeout(15000);
 
   int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
@@ -510,7 +514,7 @@ void classifyAndUpdate(const String& direction) {
   WiFiClient* stream = http.getStreamPtr();
   size_t jpegSize = http.getSize();
   
-  if (jpegSize == 0 || jpegSize > 512000) { // Sanity check
+  if (jpegSize == 0 || jpegSize > 512000) {
     Serial.printf("Invalid JPEG size: %d bytes\n", jpegSize);
     http.end();
     return;
@@ -592,7 +596,7 @@ void classifyAndUpdate(const String& direction) {
     }
   }
 
-  free(jpegData); // Free JPEG data early
+  free(jpegData);
   JpegDec.abort();
 
   // Step 5: Resize to 224x224 and normalize
@@ -601,14 +605,7 @@ void classifyAndUpdate(const String& direction) {
   float* inputData = interpreter->typed_input_tensor<float>(0);
   resizeImageBilinear(fullImage, imgWidth, imgHeight, inputData, IMG_WIDTH, IMG_HEIGHT);
   
-  free(fullImage); // Free RGB buffer
-
-  // Debug: Check some normalized values
-  Serial.println("Sample normalized values:");
-  for (int i = 0; i < 9; i++) {
-    Serial.printf("  Pixel %d: R=%.3f G=%.3f B=%.3f\n", i,
-                  inputData[i*3], inputData[i*3+1], inputData[i*3+2]);
-  }
+  free(fullImage);
 
   // Step 6: Run inference
   Serial.println("[6] Running MobileNetV1 inference...");
@@ -630,7 +627,6 @@ void classifyAndUpdate(const String& direction) {
   float* outputData = interpreter->typed_output_tensor<float>(0);
   const char* labels[] = {"Cow", "Goat", "Hen"};
 
-  // Apply softmax for proper probabilities
   softmax(outputData, 3);
 
   // Find best prediction
@@ -650,12 +646,12 @@ void classifyAndUpdate(const String& direction) {
   Serial.printf("Best prediction: %s (%.2f confidence)\n", labels[bestIdx], lastConfidence);
 
   // Step 8: Update counts with confidence threshold
-  const float CONFIDENCE_THRESHOLD = 0.6f; // Adjusted for post-quantization model
+  const float CONFIDENCE_THRESHOLD = 0.6f;
   
   if (lastConfidence < CONFIDENCE_THRESHOLD) {
-    Serial.printf("Confidence %.2f below threshold %.2f - skipping count update\n", 
+    Serial.printf("Confidence below threshold (%.2f < %.2f)\n", 
                   lastConfidence, CONFIDENCE_THRESHOLD);
-    updateOLED(); // Still update display to show the detection
+    updateOLED();
     return;
   }
 

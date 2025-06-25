@@ -1,0 +1,8 @@
+esp cam again and again ip input ap mode of esp
+
+tf lite error 
+
+custom partition 
+
+i2c error 
+esp pin error 
