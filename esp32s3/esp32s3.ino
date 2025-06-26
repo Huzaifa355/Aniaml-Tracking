@@ -25,8 +25,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 const unsigned long debounceDelay = 50;  // Debounce time in ms
 
 // Wi-Fi credentials (station mode)
-const char* ssid     = "Dhanju";
-const char* password = "Huzaifa355";
+const char* ssid     = "Huzaifa";
+const char* password = "12345678";
 
 // AP credentials
 const char* ap_ssid     = "iotex";
@@ -36,7 +36,7 @@ const char* ap_password = "12345678";
 const char* cam_ip   = "http://192.168.4.2/capture";
 
 // InfluxDB config
-const char* influx_host   = "http://192.168.100.112:8086";
+const char* influx_host   = "http://10.13.42.255:8086";
 const char* influx_org    = "student";
 const char* influx_bucket = "Animal_Tracking";
 const char* influx_token  = "aCBR21LJQE_S2nhPNGwEucEXjHWo0fdbXVhwOUNlYUAkXXTTc1jFbaNfwrUghdxQc_ALuenbe30hzPD7vAfSqw==";
@@ -388,7 +388,7 @@ void fetchLastCounts() {
   for (int i = 0; i < 3; ++i) {
     String flux =
       "from(bucket: \"" + String(influx_bucket) + "\")"
-      " |> range(start: -30d)"
+      " |> range(start: -60d)"
       " |> filter(fn: (r) => r._measurement == \"animal_counts\" and r._field == \"" 
         + String(fields[i]) + "\")"
       " |> last()";
@@ -646,7 +646,7 @@ void classifyAndUpdate(const String& direction) {
   Serial.printf("Best prediction: %s (%.2f confidence)\n", labels[bestIdx], lastConfidence);
 
   // Step 8: Update counts with confidence threshold
-  const float CONFIDENCE_THRESHOLD = 0.6f;
+  const float CONFIDENCE_THRESHOLD = 0.3f;
   
   if (lastConfidence < CONFIDENCE_THRESHOLD) {
     Serial.printf("Confidence below threshold (%.2f < %.2f)\n", 
